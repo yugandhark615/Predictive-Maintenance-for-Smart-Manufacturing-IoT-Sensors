@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Predictive Maintenance — IoT Sensor Fault Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static',filename='style.css') }}">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <div>
+      <h1>Predictive Maintenance</h1>
+      <p>Smart Manufacturing &middot; IoT Sensor Fault Monitor</p>
+    </div>
+  </div>
+  <div class="plant-status {{ status or 'idle' }}">
+    <span class="dot"></span>
+    <span class="label">
+      {% if status=="danger" %}FAULT DETECTED{% elif status=="safe" %}SYSTEM NORMAL{% else %}STANDBY{% endif %}
+    </span>
+  </div>
+</header>
+
+<main>
+
+<input id="m" name="tab" type="radio" {% if mode!="dataset" %}checked{% endif %}>
+<input id="t" name="tab" type="radio" {% if mode=="dataset" %}checked{% endif %}>
+<nav class="tabs">
+  <label for="m"><span class="idx">01</span>Manual Prediction</label>
+  <label for="t"><span class="idx">02</span>Sensor Log Analysis</label>
+</nav>
+
+<section class="manual">
+<div class="panel"><h2>Manual Prediction</h2><p class="sub">Enter a single sensor snapshot and run it through the trained failure-classification model.</p>
+<form method="post" action="/predict">
+<input type="hidden" name="mode" value="manual">
+<div class="grid">
+<label>Temperature<span class="unit">K</span><input name="temperature" type="number" placeholder="345" step=".01" required></label>
+<label>Rotational Speed<span class="unit">RPM</span><input name="speed" type="number"  placeholder="1800" step=".01" required></label>
+<label>Torque<span class="unit">Nm</span><input name="torque" type="number"  placeholder="50"  step=".01" required></label>
+<label>Tool Wear<span class="unit">min</span><input name="wear" type="number"  placeholder="120" step=".01" required></label>
+</div><button>Run Prediction</button></form></div>
+</section>
+
+<section class="dataset">
+<div class="panel"><h2>Sensor Log Analysis</h2><p class="sub">Every row of the uploaded log is checked against the same safe limits used in Manual Prediction. One reading over limit is enough to flag the whole batch.</p>
+<p class="sample">Temperature_K,Rotational Speed,Torque,Tool Wear<br>330,1500,45,100<br>332,1520,46,105<br>335,1540,47,110<br>352,1540,47,110<br>338,1560,48,115</p>
+<form method="post" action="/predict" enctype="multipart/form-data">
+<input type="hidden" name="mode" value="dataset">
+<label class="stack">CSV data<textarea name="timeseries_csv" rows="6" placeholder="Paste CSV here"></textarea></label>
+<p class="or">OR</p><label class="stack">Upload CSV<input type="file" name="timeseries_file" accept=".csv"></label>
+<button>Analyze Full Log</button></form></div>
+</section>
+
+{% if result %}
+
+{% if result=="Input Error" %}
+<div class="panel result danger"><h2>Input Error</h2><p>{{ recommendation }}</p></div>
+
+{% else %}
+
+<div class="panel result {{ status }}">
+<div class="summary">
+<div class="gauge">
+<svg viewBox="0 0 200 120"><path d="M20 100 A80 80 0 0 1 180 100" fill="none" stroke="var(--track)" stroke-width="14"/><line x1="100" y1="100" x2="100" y2="32" stroke="var(--needle)" stroke-width="3" transform="rotate({{ -90+probability*1.8 }} 100 100)"/><circle cx="100" cy="100" r="6" fill="var(--needle)"/></svg>
+<strong>{{ probability }}%</strong>
+<small>{% if mode=="manual" %}Failure Probability{% else %}Readings Exceeding Limits{% endif %}</small>
+</div>
+<div class="verdict">
+<h2>{{ result }}</h2>
+<p>{{ recommendation }}</p>
+<p class="meta">Failure Type: <b>{{ failure_type }}</b>{% if mode=="dataset" %} &nbsp;|&nbsp; Rows Analyzed: <b>{{ total_rows }}</b> &nbsp;|&nbsp; Rows Flagged: <b>{{ row_errors_total }}</b>{% endif %}</p>
+</div>
+</div>
+</div>
+
+<div class="panel"><h2>Sensor Status</h2>
+<div class="led-strip">
+{% for n,i in risks.items() %}
+<div class="led {{ i.level|lower }}"><span class="dot"></span><div><b>{{ n }}</b><strong>{{ i.value }}</strong><span class="tag">{{ i.level }}</span></div></div>
+{% endfor %}
+</div>
+</div>
+
+<div class="two">
+<div class="panel"><h2>Sensor Reading Profile</h2><p class="sub">{% if mode=="manual" %}Current reading vs. limit, per sensor.{% else %}Worst-case reading observed in the log, per sensor.{% endif %}</p><div class="chart"><canvas id="readings"></canvas></div></div>
+
+{% if mode=="manual" %}
+<div class="panel"><h2>Feature Importance</h2><p class="sub">Which readings pushed the model's decision.</p><div class="chart"><canvas id="importance"></canvas></div></div>
+{% else %}
+<div class="panel"><h2>Threshold Breach Rate</h2><p class="sub">Share of rows where each sensor exceeded its limit.</p><div class="chart"><canvas id="breach"></canvas></div></div>
+{% endif %}
+</div>
+
+{% if mode=="dataset" %}
+<div class="panel"><h2>Sensor Trends &amp; Limits</h2><p class="sub">Every reading in the uploaded log, per sensor. Points past the dashed limit line are the ones raising an error.</p>
+<div class="trend-grid">
+{% for fs in feature_stats %}
+<div class="trend-card">
+<div class="trend-head"><b>{{ fs.label }}</b><span class="badge {{ 'danger' if fs.breach_count else 'safe' }}">{{ fs.status }}</span></div>
+<div class="trend-sub">Limit {{ fs.threshold }}{{ fs.unit }} &middot; Peak {{ fs.max_value }}{{ fs.unit }} (row {{ fs.max_row }}) &middot; {{ fs.breach_count }} breach{{ '' if fs.breach_count==1 else 'es' }} ({{ fs.breach_pct }}%)</div>
+<div class="chart small"><canvas id="trend_{{ fs.key|replace(' ','') }}"></canvas></div>
+</div>
+{% endfor %}
+</div>
+</div>
+
+<div class="panel"><h2>Flagged Readings</h2>
+{% if row_errors %}
+<p class="sub">{{ row_errors_total }} of {{ total_rows }} rows raised at least one sensor error{% if row_errors_total>100 %} — showing the first 100{% endif %}.</p>
+<table><tr><th>Row</th><th>Errors</th></tr>
+{% for re in row_errors %}
+<tr><td>{{ re.row }}</td><td>{% for e in re.errors %}<span class="err">{{ e.feature }} {{ e.value }}{{ e.unit }} &gt; {{ e.threshold }}{{ e.unit }} limit</span>{% endfor %}</td></tr>
+{% endfor %}
+</table>
+{% else %}
+<p class="sub">No rows exceeded any sensor's safe limit.</p>
+{% endif %}
+</div>
+{% endif %}
+
+{% endif %}
+{% else %}
+<div class="panel"><h2>Ready</h2><p class="sub">Enter sensor values or submit a sensor log to see a prediction.</p></div>
+{% endif %}
+
+</main>
+
+{% if result and result!="Input Error" %}
+<script id="read">{{ risks|tojson }}</script>
+{% if mode=="manual" %}<script id="imp">{{ importance|tojson }}</script>{% endif %}
+{% if mode=="dataset" %}<script id="fstats">{{ feature_stats|tojson }}</script><script id="series">{{ series|tojson }}</script>{% endif %}
+<script src="{{ url_for('static',filename='app.js') }}"></script>
+{% endif %}
+
+</body></html>
